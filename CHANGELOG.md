@@ -13,4 +13,5 @@ First public alpha.
   Jet Ranks (1-39).
 - Corn explains the starting area on a New Game and asks before Gouji's Tower; in a Jet Ranks seed he tracks your Jets.
 - Item notices on the game screen in the game's own font.
+- The pause screen's Graffiti Soul total shows the Graffiti Soul items you've received.
 - The client warns when a seed was made with a different release.
