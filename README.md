@@ -4,6 +4,8 @@ An [Archipelago](https://archipelago.gg) world and client for Jet Set Radio Futu
 
 **Current release: v1.0a (alpha).**
 
+**This project was developed along side AI**
+
 ## What it does
 
 You skate Tokyo-to as it is after the story, with the Garage as your hub. Every area stays locked until its Unlock item
