@@ -110,6 +110,15 @@ CURRENT_CHAR_VAR = 0xD             # the character you play as (character select
 TEST_MENU_SLOT = 0x128A
 TEST_MENU_VTABLE = 0x1CCCD8
 TEST_MENU_CLOSED_VAR = 0x1A2
+
+# The pause menu (the map screen): opening it builds an object (factory 0x78C19 -> constructor 0x78520, vtable 0x1CCD18)
+# in manager slot 0x1167. The constructor copies the Graffiti Soul total (0x39FD0, the Possess bits) into +0x1B0 and the
+# current area's count (0x3A130) into +0x1B4; the screen's draw code (0x112D21) prints +0x1B0 with "%d" every frame. So
+# writing +0x1B0 while the menu is open changes only the number shown (user, 2026-11-19 22:21: the map screen should show
+# the Graffiti Soul items received, not the souls picked up). +0x1BC / +0x1C0 ("%d(%d%%)") are graffiti progress.
+PAUSE_MENU_SLOT = 0x1167
+PAUSE_MENU_VTABLE = 0x1CCD18
+PAUSE_MENU_SOULS = 0x1B0
 TM_TOP, TM_TOP_TESTRUN, TM_CATEGORIES = 0xB4, 0x58, 0xCC
 TM_LISTS = ((0xD4, 13), (0xD8, 13), (0xDC, 6), (0xE0, 7))          # by type: Graffiti, Tech, Dash, Flag
 TEST_MENU_STAGES = (0x10000, 0x10001, 0x10002, 0x10003, 0x20000, 0x20001, 0x20002, 0x20003, 0x20004,
@@ -571,6 +580,31 @@ class JSRFGame:
 
     def chapter_number(self) -> Optional[int]:
         return self._u32(CHAPTER_NUMBER)
+
+    def pause_menu(self) -> Optional[int]:
+        """The pause menu object's address while it is open, else None (the slot can keep a destroyed object: its
+        vtable is checked)."""
+        gm = self._u32(GAME_MGR_PTR)
+        if not gm or gm >= XBOX_RAM - 0x8000:
+            return None
+        obj = self._u32(gm + 0x98 + 4 * PAUSE_MENU_SLOT)
+        if not obj or obj >= XBOX_RAM - 0x200 or self._u32(obj) != PAUSE_MENU_VTABLE:
+            return None
+        return obj
+
+    def set_menu_souls(self, value: int) -> Optional[bool]:
+        """Make the open pause menu show `value` as its Graffiti Soul total. True when written, False when it already
+        showed it, None when no menu is open (or no write access)."""
+        write = getattr(self.reader, "write", None)
+        obj = self.pause_menu()
+        if obj is None or write is None:
+            return None
+        shown = self._u32(obj + PAUSE_MENU_SOULS)
+        if shown is None or shown > 0xFFFF:              # a soul total; anything else means it is not the menu we know
+            return None
+        if shown == value:
+            return False
+        return bool(write(obj + PAUSE_MENU_SOULS, struct.pack("<I", value)))
 
     def test_menu(self) -> Optional[dict]:
         """Roboy's Test Run menu while it is open and its lists are built (chapter 9): its address and, per type, the list

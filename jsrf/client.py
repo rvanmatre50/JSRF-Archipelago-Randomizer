@@ -53,6 +53,7 @@ TOWER_STAGES = frozenset({TOWER_STAGE, *FINALE_STAGES})      # the Zero Beat fig
 KNOWN_STAGES = frozenset({GARAGE_STAGE, *STAGE_AREAS, *OTHER_STAGES, *TOWER_STAGES})
 
 POLL_SECONDS = 0.25
+MENU_POLL = 0.05               # seconds between looks for the open pause menu (its soul total, menu_watcher)
 TAPE_SCAN_SECONDS = 0.5        # how often to look for a picked-up tape the level placed again
 TAPE_EVENT_MAX = 20.0          # a defused tape sequence that is still there after this long: set the tape's flag anyway
 ITEM_SETTLE_SECONDS = 3.0      # after connecting, wait for the item list before calling an area locked
@@ -657,6 +658,7 @@ class JSRFContext(CommonContext):
         self.notice_count: Optional[int] = None    # items already accounted for notices (None: next batch is the connect sync)
         self.between_told = None                   # (mission id, stage) last reported as "between levels"
         self.soul_counter_mode = "items"           # the game's soul counter: "items" received, "pickups", "game" (/soulcounter)
+        self.menu_souls_told = False               # logged once: the pause menu's soul total follows the items
         self.soul_counter_restore = False          # "game" chosen: put the game's own count back once
         self.soul_counter_told = self.soul_counter_ahead_told = self.soul_counter_cap_told = False
         self.chapter_auto = True                   # set the save's chapter number to 9 in the free-skate chapter (/chapter turns it off)
@@ -1414,6 +1416,23 @@ class JSRFContext(CommonContext):
             detail.info("The credits are rolling (mission 8:899): the final boss is beaten.")
         return self.goal_reached and not self.tower_missing()
 
+    def sync_menu_souls(self) -> Optional[bool]:
+        """While the pause menu (the map screen) is open, its Graffiti Soul total shows the Graffiti Soul items received
+        (user, 2026-11-19 22:21). Only that number changes: the soul flags, the per-area counts and Roboy's rule stay as
+        they are. True when written, False when it already showed it, None when there is nothing to do."""
+        if self.game_reader is None or self.slot is None or self.save_status in ("old", "foreign"):
+            return None
+        if not getattr(self.game_reader, "can_write", False):
+            return None
+        target = self.soul_counter_target()
+        if target is None:                                       # /soulcounter game: the game's own count
+            return None
+        result = self.state().set_menu_souls(target)
+        if result and not self.menu_souls_told:
+            self.menu_souls_told = True
+            detail.info("The pause menu's Graffiti Soul total now shows the Graffiti Soul items received (%d)." % target)
+        return result
+
     def check_release(self, seed_release: Optional[str]) -> bool:
         """Compare the release the seed was made with (slot data "release") with this client's. Says so in the window
         when they differ; True when they match."""
@@ -2076,6 +2095,20 @@ async def watch_step(ctx: JSRFContext):
 
 
 
+async def menu_watcher(ctx: JSRFContext):
+    """Looks for the open pause menu often (MENU_POLL), so its Graffiti Soul total shows the items received from the
+    first frames on (the main watcher polls every POLL_SECONDS)."""
+    while not ctx.exit_event.is_set():
+        await asyncio.sleep(MENU_POLL)
+        try:
+            ctx.sync_menu_souls()
+        except Exception as e:                                 # the game closing mid-read and the like: note once
+            key = "menu: %s: %s" % (type(e).__name__, e)
+            if key not in ctx.watch_errors:
+                ctx.watch_errors.add(key)
+                detail.info("Pause menu soul total: %s" % key)
+
+
 async def game_watcher(ctx: JSRFContext):
     while not ctx.exit_event.is_set():
         await asyncio.sleep(POLL_SECONDS)
@@ -2097,6 +2130,7 @@ def launch(*launch_args: str):
             ctx.run_gui()
         ctx.run_cli()
         ctx.watcher_task = asyncio.create_task(game_watcher(ctx), name="JSRFWatcher")
+        ctx.menu_task = asyncio.create_task(menu_watcher(ctx), name="JSRFMenuWatcher")
         await ctx.exit_event.wait()
         ctx.corn_restore()                                         # Corn gets his own words back
         ctx.garage_restore()                                       # ...and the Garage its own files
