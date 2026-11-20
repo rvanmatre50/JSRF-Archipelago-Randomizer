@@ -6,7 +6,7 @@ An [Archipelago](https://archipelago.gg) world and client for Jet Set Radio Futu
 
 ## What it does
 
-You skate the city as it is after the story, with the Garage as your hub. Every area stays locked until its Unlock item
+You skate Tokyo-to as it is after the story, with the Garage as your hub. Every area stays locked until its Unlock item
 arrives, and what you find in the city is sent out to the multiworld.
 
 **Checks**
