@@ -2,7 +2,7 @@
 
 An [Archipelago](https://archipelago.gg) world and client for Jet Set Radio Future, played on JSRF Unleashed for Windows.
 
-**Current release: v1.0a (alpha).**
+**Current release: v1.1a (alpha).**
 
 **This project was developed along side AI**
 
