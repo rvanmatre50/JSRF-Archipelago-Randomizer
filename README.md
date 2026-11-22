@@ -2,13 +2,11 @@
 
 An [Archipelago](https://archipelago.gg) world and client for Jet Set Radio Future, played on JSRF Unleashed for Windows.
 
-**Current release: v1.1a (alpha).**
-
-**This project was developed along side AI**
+**Current release: v1.0a (alpha).**
 
 ## What it does
 
-You skate Tokyo-to as it is after the story, with the Garage as your hub. Every area stays locked until its Unlock item
+You skate the city as it is after the story, with the Garage as your hub. Every area stays locked until its Unlock item
 arrives, and what you find in the city is sent out to the multiworld.
 
 **Checks**
