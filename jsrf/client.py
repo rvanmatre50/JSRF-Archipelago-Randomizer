@@ -54,6 +54,7 @@ KNOWN_STAGES = frozenset({GARAGE_STAGE, *STAGE_AREAS, *OTHER_STAGES, *TOWER_STAG
 
 POLL_SECONDS = 0.25
 MENU_POLL = 0.05               # seconds between looks for the open pause menu (its soul total, menu_watcher)
+RESTORE_EVERY = 2.0            # seconds between looks for progress the server has but the loaded save lacks
 TAPE_SCAN_SECONDS = 0.5        # how often to look for a picked-up tape the level placed again
 TAPE_EVENT_MAX = 20.0          # a defused tape sequence that is still there after this long: set the tape's flag anyway
 ITEM_SETTLE_SECONDS = 3.0      # after connecting, wait for the item list before calling an area locked
@@ -659,7 +660,12 @@ class JSRFContext(CommonContext):
         self.between_told = None                   # (mission id, stage) last reported as "between levels"
         self.soul_counter_mode = "items"           # the game's soul counter: "items" received, "pickups", "game" (/soulcounter)
         self.menu_souls_told = False               # logged once: the pause menu's soul total follows the items
-        self.soul_counter_restore = False          # "game" chosen: put the game's own count back once
+        self.restore_at = 0.0                      # next look for progress to put back (restore_progress)
+        self.restore_told = False                  # a failed restore was reported
+        self.own_done: Optional[Set[int]] = None   # restorable checks seen done in this seed's game (server data storage;
+                                                   # None until read)
+        self.own_asked = False                     # the read of own_done has been sent
+        self.soul_counter_restore = False         # "game" chosen: put the game's own count back once
         self.soul_counter_told = self.soul_counter_ahead_told = self.soul_counter_cap_told = False
         self.chapter_auto = True                   # set the save's chapter number to 9 in the free-skate chapter (/chapter turns it off)
         self.chapter_told = False
@@ -1287,6 +1293,8 @@ class JSRFContext(CommonContext):
             else:
                 status = "ok"
                 tied = self.state().write_save_marker(mine)
+                if tied:
+                    self.on_new_save()
                 if self.save_status != "ok":
                     (detail if tied else logger).info(("This save is now tied to this seed." if not found else
                                  "This save's progress matches this seed; it is now tied to this seed.")
@@ -1304,6 +1312,79 @@ class JSRFContext(CommonContext):
                 logger.info("This save belongs to another seed. The client sends nothing and leaves this save alone. Start "
                             "a New Game for this seed, or type /usesave to use this save anyway.")
         return status == "ok"
+
+    def own_key(self) -> str:
+        """Server data storage key: the restorable checks this seed's game has shown done (a list of location ids).
+        restore_progress puts back only these: the server's checked locations also hold the ones another world's
+        !collect or a !release marked (user, 2026-11-21 17:26: OOT's goal collected its items from JSRF, the client then
+        "put back" 21 Street Challenges it had never seen cleared, and Gouji's Tower opened)."""
+        return "jsrf_done_%s_%s" % (getattr(self, "team", None), self.slot)
+
+    def note_own_progress(self, found: Set[int]) -> Set[int]:
+        """The restorable checks this seed's save shows done that own_done does not have yet; they are added to own_done
+        and the caller stores them on the server. Nothing while own_done is unread or the loaded save is not this
+        seed's (save_status ok). The game only shows a check done when the player did it or restore_progress put it
+        back from own_done, so the list stays the player's own."""
+        if self.own_done is None or self.save_status != "ok" or self.on_title_screen():
+            return set()
+        new = (set(found) & jsrf_game.RESTORABLE) - self.own_done
+        self.own_done |= new
+        return new
+
+    def restore_progress(self, found: Set[int], now: float) -> int:
+        """Put back what the player did in this seed's game but the loaded save lacks (user, 2026-11-21: a game over or a
+        lost rival fight sends the player to the main menu, and the save, or a New Game, no longer has the progress since
+        the last save). The record is own_done (what the game showed done, kept on the server) within the server's
+        checked locations; a check only !collect or !release marked is never put back (user, 17:26). Souls, Street
+        Challenges (cleared mark + soul), rival wins, Jet ranks and tags (user, 09:34; the loaded area's once the player
+        has left it) are written back; Mystery Tapes come back through sync_tapes. Looks every RESTORE_EVERY
+        seconds, only with this seed's save in the free-skate chapter (chapter 9) and outside Corn's talks. Returns the
+        number of checks put back."""
+        if now < self.restore_at:
+            return 0
+        self.restore_at = now + RESTORE_EVERY
+        if not getattr(self.game_reader, "can_write", False) or self.save_status != "ok" or self.corn_phase:
+            return 0
+        if now - self.connected_at < ITEM_SETTLE_SECONDS or self.own_done is None:
+            return 0
+        checked = set(getattr(self, "checked_locations", set()) or set())
+        missing = (checked & jsrf_game.RESTORABLE & self.own_done) - found
+        if not missing:
+            return 0
+        state = self.state()
+        if state.chapter_number() != 9:                     # New Game: wait for the free-skate Garage
+            return 0
+        plan = jsrf_game.restore_plan(missing)
+        tags = plan.pop("tags")
+        if any(plan.values()) and not state.restore_progress(plan):
+            if not self.restore_told:
+                self.restore_told = True
+                logger.info("Could not put back this save's missing progress (the game did not take the change).")
+            return 0
+        tags_done: Set[tuple] = set()
+        if tags:
+            # Tags of the area the player is in come back once they have left it (see JSRFGame.restore_tags).
+            code = state.current_stage()
+            tags_done = state.restore_tags(tags, area_of_stage(code) if code is not None else None)
+        souls = len(plan["souls"]) - len(plan["marks"])
+        parts = [(souls, "Graffiti Soul"), (len(plan["marks"]), "Street Challenge"), (len(plan["rivals"]), "rival gang win"),
+                 (len(plan["jets"]), "Jet rank"), (len(tags_done), "tag")]
+        said = ", ".join("%d %s%s" % (n, what, "" if n == 1 else "s") for n, what in parts if n)
+        if said:
+            logger.info("Put back progress this save was missing (you had done it in this seed's game): %s." % said)
+        return sum(n for n, _ in parts)
+
+    def on_new_save(self):
+        """A save was just tied to this seed: a New Game (it zeroes the flag record that holds the marker) or this seed's
+        save from before the marker. What the client did for the previous save no longer applies, so the New Game steps
+        are armed again (user, 2026-11-21: after a lost rival fight sent him to the main menu and he started a New Game,
+        Corn's talk no longer led to the free-skate Garage, as that ran once per game start)."""
+        self.auto_garage_done = False
+        self.corn_phase = None
+        self.roster_last = None
+        self.test_run_seen, self.shut_garage = False, None
+        self.restore_told, self.restore_at = False, 0.0
+        detail.info("A new save for this seed: Corn's New Game talk will lead to the free-skate Garage again.")
 
     def tower_ask_key(self) -> str:
         """Server data storage key: how often Corn has asked about Gouji's Tower by himself (he does that once per seed;
@@ -1887,6 +1968,7 @@ class JSRFContext(CommonContext):
             self.refill_asked = False
             self.tower_asks = None                           # read again (watcher asks)
             self.tower_asks_read = False
+            self.own_done, self.own_asked = None, False      # read again (watcher asks)
             self.corn_phase = None
             self.corn_told.clear()
             if self.game_reader is not None:
@@ -1910,6 +1992,15 @@ class JSRFContext(CommonContext):
                     self.tower_asks = max(int(keys[self.tower_ask_key()] or 0), 0)
                 except (TypeError, ValueError):
                     self.tower_asks = 0
+            if self.slot is not None and self.own_key() in keys:
+                value = keys[self.own_key()]
+                own: Set[int] = set()
+                for loc in value if isinstance(value, list) else ():
+                    try:
+                        own.add(int(loc))
+                    except (TypeError, ValueError):
+                        pass
+                self.own_done = own | (self.own_done or set())
 
     def show_item_notices(self):
         """Put an "Item received" notice over the game window for every item that arrived since the last call. The first
@@ -2066,6 +2157,14 @@ async def watch_step(ctx: JSRFContext):
     ctx.sync_tapes(code)
     ctx.note_rival_fight()
     ctx.sync_test_runs(code)
+    if ctx.own_done is None and not ctx.own_asked:
+        ctx.own_asked = True
+        await ctx.send_msgs([{"cmd": "Get", "keys": [ctx.own_key()]}])
+    own_new = ctx.note_own_progress(found)
+    if own_new:
+        await ctx.send_msgs([{"cmd": "Set", "key": ctx.own_key(), "default": [], "want_reply": False,
+                              "operations": [{"operation": "update", "value": sorted(own_new)}]}])
+    ctx.restore_progress(found, time.monotonic())
     ctx.sync_soul_counter()
     if ctx.tower_asks is None and not ctx.tower_asks_read:
         ctx.tower_asks_read = True

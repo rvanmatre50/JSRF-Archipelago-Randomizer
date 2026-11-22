@@ -92,6 +92,23 @@ def tag_done(state: int, parts: int) -> bool:
 
 TAG_PARTS = {(area, slot): parts for area in AREAS for slot, parts in TAG_SPOTS[area]}
 
+# One-time tag reset (found 2026-11-21, after 19 restored Shibuya tags came back unsprayed). Eight areas' chapter 8 and 9
+# missions (mssn08xx / mssn09xx, record table 0x174) start with "if Global flag F = 0: op 0x88 on tag list 1, set F". Op 0x88
+# (handler 0x5A657; ops go through the byte table 0x5B334 and the jump table 0x5B18C) writes 7 into every part of each spot of
+# that list (the mission header's +0x44 lists, 12-byte entries, slot at +4) through 0x3A400, i.e. un-sprays them. A New
+# Game zeroes the flags, so the first visit after it wiped those spots even when the client had put them back. The flags
+# are used for nothing else (scan of every mission file). Area -> (Global flag, the slots of its list 1).
+TAG_RESET = {
+    "Skyscraper District and Pharaoh Park": (21, frozenset({6, 7, 8, 9, 14, 15})),
+    "Rokkaku-dai Heights": (22, frozenset({11, 12, 13, 14, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32})),
+    "Kibogaoka Hill": (23, frozenset({5, 11, 22, 24})),
+    "Shibuya Terminal": (24, frozenset(range(21, 42))),
+    "Chuo Street": (25, frozenset(range(15, 27))),
+    "Dogenzaka Hill": (26, frozenset(range(20, 30))),
+    "Hikage Street": (27, frozenset({35, 60})),
+    "99th Street": (28, frozenset({19, 20, 21, 22, 28, 29, 32, 33})),
+}
+
 # Character roster (default.xbe 0x39CB0 set / 0x39CF0 clear / 0x39D10 test): one bit per character id. The game's unlock also
 # writes -1 to manager variable 0x151 + id; jsrf_roster.py does the same writes and was confirmed in play (Roboy, Beat).
 ROSTER = FLAG_MGR + 0x14           # 0x1EFFC4
@@ -196,6 +213,44 @@ RIVAL_LOCATIONS = {r.flag: rival_location_id(r) for r in RIVAL_BATTLES}
 # Ids of the souls a Street Challenge awards (the other 40 are pre-spawned in the level).
 CHALLENGE_IDS = frozenset(loc.soul_no - 1 for area in AREAS for loc in AREA_LOCATIONS[area]
                           if loc.kind == "challenge_soul")
+# Challenge soul id -> its "challenge cleared" mark, Riddle flag 192 + 5N + i (N = the area's tape number, i = the
+# challenge). i is the soul's place among the area's challenge souls: the area missions' sub-missions list their challenge
+# souls (op 0x8C, handler 0x5A768, mission soul table at header +0xAC, soul id at +0xC) in that same order (mssn0921, 0926, 0931, 0941,
+# 0946, 0956, 0971 checked, 2026-11-21).
+CHALLENGE_MARK = {loc.soul_no - 1: 192 + 5 * TAPE_FLAG[area] + i
+                  for area in AREAS
+                  for i, loc in enumerate(l for l in AREA_LOCATIONS[area] if l.kind == "challenge_soul")}
+
+
+SOUL_OF_LOCATION = {loc: soul for soul, loc in SOUL_LOCATIONS.items()}
+RIVAL_FLAG_OF_LOCATION = {loc: flag for flag, loc in RIVAL_LOCATIONS.items()}
+JET_RUN_OF_LOCATION = {JET_LOCATION_OF[(run.area, run.hi)]: run for run in TEST_RUNS}
+TAG_OF_LOCATION = {tag_id(area, slot): (area, slot) for area, slot in TAG_PARTS}
+RESTORABLE = (frozenset(SOUL_OF_LOCATION) | frozenset(RIVAL_FLAG_OF_LOCATION) | frozenset(JET_RUN_OF_LOCATION)
+              | frozenset(TAG_OF_LOCATION))
+
+
+def restore_plan(location_ids) -> Dict[str, set]:
+    """What to write back into the game for these location ids (checks the server already has but the loaded save lacks,
+    e.g. after a game over sent the player to the main menu without saving, or a New Game; user, 2026-11-21): soul ids,
+    challenge marks, rival flags and Test Runs. Mystery Tapes are left to the client's tape sync (it already sets the
+    pickup flag of every tape the server has); recruits and Test Run characters are not restored. Tags are (area, slot)
+    pairs for JSRFGame.restore_tags."""
+    plan: Dict[str, set] = {"souls": set(), "marks": set(), "rivals": set(), "jets": set(), "tags": set()}
+    for loc in location_ids:
+        if loc in TAG_OF_LOCATION:
+            plan["tags"].add(TAG_OF_LOCATION[loc])
+            continue
+        soul = SOUL_OF_LOCATION.get(loc)
+        if soul is not None:
+            plan["souls"].add(soul)
+            if soul in CHALLENGE_MARK:
+                plan["marks"].add(CHALLENGE_MARK[soul])
+        elif loc in RIVAL_FLAG_OF_LOCATION:
+            plan["rivals"].add(RIVAL_FLAG_OF_LOCATION[loc])
+        elif loc in JET_RUN_OF_LOCATION:
+            plan["jets"].add(JET_RUN_OF_LOCATION[loc])
+    return plan
 
 
 class JSRFGame:
@@ -550,6 +605,67 @@ class JSRFGame:
             return set()
         bits = int.from_bytes(raw, "little")
         return {loc for flag, loc in RIVAL_LOCATIONS.items() if bits >> flag & 1}
+
+    def restore_progress(self, plan: Dict[str, set]) -> bool:
+        """Write back progress the server already has (see restore_plan): soul Get + Possess bits (and Appear for a
+        Street Challenge soul), the challenges' cleared marks, rival wins and Jet ranks. Only sets, never clears. True
+        when every write took."""
+        ok = True
+        souls = plan.get("souls") or set()
+        if souls:
+            ok = self._set_flags(SOUL_GET, {i: True for i in souls}) and ok
+            ok = self._set_flags(SOUL_POSSESS, {i: True for i in souls}) and ok
+            challenge = {i for i in souls if i in CHALLENGE_IDS}
+            if challenge:
+                ok = self._set_flags(SOUL_APPEAR, {i: True for i in challenge}) and ok
+        if plan.get("marks"):
+            ok = self.set_riddle_flags({f: True for f in plan["marks"]}) and ok
+        if plan.get("rivals"):
+            ok = self._set_flags(GLOBAL_FLAGS, {f: True for f in plan["rivals"]}) and ok
+        write = getattr(self.reader, "write", None)
+        for run in plan.get("jets") or ():
+            addr = JET_RECORDS + 8 * ((GAME_AREA_INDEX[run.area] * 4 + run.record_type) * 5) + (5 if run.record_type == 1 else 6)
+            raw = self.reader.read(addr, 1)
+            if len(raw) == 1 and JET_RANK <= raw[0] <= JET_RANK_MAX:
+                continue
+            ok = bool(write and write(addr, bytes([JET_RANK]))) and ok
+        return ok
+
+    def restore_tags(self, spots: Set[tuple], loaded_area: Optional[str]) -> Set[tuple]:
+        """Mark tag spots sprayed in the saved tag record (user, 2026-11-21). A spot of an area that is not loaded reads
+        its state from this record when the area loads (0x3A340 at 0x3F0E1), so it comes back sprayed. Each of the
+        spot's parts gets 0 (sprayed), the rest of the word and the aux word stay as they are: New Game leaves both
+        FFFFFFFF (0x3B2B2), and spots sprayed with aux FFFFFFFF were seen drawn and counted in play (Dogenzaka slots
+        4-12, 2026-11-16). The loaded area is skipped: the game copies its live spots over the record on a save or when
+        the mission ends (0x3E930), so those spots are done once the player has left. An area record that is all zero
+        (never initialised) is skipped too. When a spot of an area's one-time reset list is done, that area's reset flag is
+        set as well (TAG_RESET), so the area's first load does not un-spray it again. Returns the spots written (or found
+        done already)."""
+        write = getattr(self.reader, "write", None)
+        done: Set[tuple] = set()
+        if write is None:
+            return done
+        blocks: Dict[str, bytes] = {}
+        for area, slot in sorted(spots):
+            if area == loaded_area or (area, slot) not in TAG_PARTS:
+                continue
+            if area not in blocks:
+                blocks[area] = self.reader.read(TAG_RECORD + 8 * GAME_AREA_INDEX[area] * TAG_SLOTS, 8 * TAG_SLOTS)
+            block = blocks[area]
+            if len(block) != 8 * TAG_SLOTS or not any(block):
+                continue
+            state = struct.unpack_from("<I", block, 8 * slot)[0]
+            parts = TAG_PARTS[(area, slot)]
+            if tag_done(state, parts):
+                done.add((area, slot))
+                continue
+            sprayed = state & ~((1 << (3 * min(parts, 10))) - 1) & 0xFFFFFFFF
+            if write(TAG_RECORD + 8 * (GAME_AREA_INDEX[area] * TAG_SLOTS + slot), struct.pack("<I", sprayed)):
+                done.add((area, slot))
+        gates = {TAG_RESET[area][0] for area, slot in done if area in TAG_RESET and slot in TAG_RESET[area][1]}
+        if gates:
+            self._set_flags(GLOBAL_FLAGS, {flag: True for flag in gates})
+        return done
 
     def collected_locations(self, challenge_on_clear: bool = False, tags: bool = False) -> Optional[Set[int]]:
         """Archipelago location ids for the souls collected so far (None while not ready).

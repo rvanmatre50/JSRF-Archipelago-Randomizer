@@ -110,6 +110,42 @@ class Painter:
         return jetfont.compose(lines, pad_x, pad_y, gap, BOX_ALPHA)
 
 
+def z_plan(game: int, own: int, prev_of: Callable[[int], int], topmost: Callable[[int], bool]) -> Optional[int]:
+    """Where the notice window goes in the window stack so it sits right above the game and under anything that covers
+    the game (user, 2026-11-20: a window opened over the game still showed the notices, as the notice window was
+    always-on-top). None: it is already right above the game. A window handle: put the notice window just under that
+    window (the one right above the game). 0: the game is the top ordinary window, so the notice window goes to the top
+    of the ordinary windows. -1: the game window is itself always-on-top (a borderless fullscreen mode can be) and is the
+    top one, so the notice window goes always-on-top as well."""
+    above = prev_of(game)
+    if above and above == own:
+        return None
+    if topmost(game):
+        return above if above else -1
+    if above and not topmost(above):
+        return above
+    return 0
+
+
+def z_moves(game: Optional[int], own: int, prev_of: Callable[[int], int],
+            topmost: Callable[[int], bool]) -> List[Tuple[str, int]]:
+    """The SetWindowPos steps for z_plan: ("after", window), ("topmost", 0) or ("notopmost", 0), in order. With no game
+    window the notice window goes to the top of the ordinary windows."""
+    where = z_plan(game, own, prev_of, topmost) if game else 0
+    if where is None:
+        return []
+    if where == -1:
+        return [("topmost", 0)]
+    if where:
+        steps = []
+        if game and not topmost(game) and topmost(own):      # the game stopped being always-on-top
+            steps.append(("notopmost", 0))
+        return steps + [("after", where)]
+    # To the top of the ordinary windows. A program in the background may not raise its window with HWND_TOP; going
+    # always-on-top and straight back is allowed and lands there.
+    return [("topmost", 0), ("notopmost", 0)]
+
+
 class Overlay:
     """The notice window. `start()` is safe to call on any system; off Windows it does nothing."""
 
@@ -176,6 +212,8 @@ class Overlay:
             (user32, "SetTimer"): (ctypes.c_size_t, [wt.HWND, ctypes.c_size_t, wt.UINT, ctypes.c_void_p]),
             (user32, "GetWindowThreadProcessId"): (wt.DWORD, [wt.HWND, ctypes.POINTER(wt.DWORD)]),
             (user32, "IsWindowVisible"): (wt.BOOL, [wt.HWND]),
+            (user32, "IsIconic"): (wt.BOOL, [wt.HWND]),
+            (user32, "GetWindowLongW"): (ctypes.c_long, [wt.HWND, ctypes.c_int]),
             (user32, "GetWindow"): (wt.HWND, [wt.HWND, wt.UINT]),
             (user32, "GetMessageW"): (wt.BOOL, [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]),
             (user32, "TranslateMessage"): (wt.BOOL, [ctypes.POINTER(wt.MSG)]),
@@ -208,8 +246,9 @@ class Overlay:
         WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_EX_LAYERED = 0x8, 0x80, 0x80000
         WS_EX_TRANSPARENT, WS_EX_NOACTIVATE = 0x20, 0x08000000
         SW_HIDE, SW_SHOWNOACTIVATE = 0, 4
-        HWND_TOPMOST = wt.HWND(-1)
+        HWND_TOPMOST, HWND_NOTOPMOST = wt.HWND(-1), wt.HWND(-2)
         SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x2, 0x1, 0x10
+        GW_OWNER, GW_HWNDPREV, GWL_EXSTYLE = 4, 3, -20
         ULW_ALPHA, AC_SRC_OVER, AC_SRC_ALPHA = 0x2, 0x0, 0x1
         TRANSPARENT_BK = 1
 
@@ -257,7 +296,8 @@ class Overlay:
 
         painter = Painter(measure_gdi, self.on_note)
 
-        def find_game_window() -> Optional[wt.RECT]:
+        def find_game_window() -> Optional[Tuple[int, wt.RECT, bool]]:
+            """The game's main window: (handle, rectangle, minimized), or None."""
             if not self.pid:
                 return None
             found = []
@@ -266,18 +306,33 @@ class Overlay:
             def each(hwnd, _):
                 pid = wt.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value == self.pid and user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, 4):  # no owner
+                if pid.value == self.pid and user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, GW_OWNER):
                     r = wt.RECT()
-                    if user32.GetWindowRect(hwnd, ctypes.byref(r)) and r.right - r.left > 200:
-                        found.append(((r.right - r.left) * (r.bottom - r.top), r))
+                    if user32.IsIconic(hwnd):           # minimized: its rectangle is tiny and far off screen
+                        found.append((0, hwnd, r, True))
+                    elif user32.GetWindowRect(hwnd, ctypes.byref(r)) and r.right - r.left > 200:
+                        found.append(((r.right - r.left) * (r.bottom - r.top), hwnd, r, False))
                 return True
             user32.EnumWindows(each, 0)
-            return max(found, key=lambda f: f[0])[1] if found else None
+            if not found:
+                return None
+            _, hwnd, r, iconic = max(found, key=lambda f: f[0])
+            return hwnd, r, iconic
 
-        def show(hwnd, texts: List[str]):
-            game = find_game_window()
-            if game is None:                    # no game window found: the main screen
-                game = wt.RECT(0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+        def prev_of(h: int) -> int:
+            return user32.GetWindow(h, GW_HWNDPREV) or 0
+
+        def topmost(h: int) -> bool:
+            return bool(user32.GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOPMOST)
+
+        def place(hwnd, game_hwnd: Optional[int]):
+            """Keep the notice window right above the game in the window stack (see z_plan)."""
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            for step, other in z_moves(game_hwnd, hwnd, prev_of, topmost):
+                after = {"topmost": HWND_TOPMOST, "notopmost": HWND_NOTOPMOST}.get(step) or wt.HWND(other)
+                user32.SetWindowPos(hwnd, after, 0, 0, 0, 0, flags)
+
+        def paint(hwnd, texts: List[str], game: wt.RECT):
             game_w, game_h = game.right - game.left, game.bottom - game.top
             margin = int(game_h * MARGIN)
             painter.root = self.game_root
@@ -295,17 +350,44 @@ class Overlay:
                     raise OSError("UpdateLayeredWindow failed (%d)" % k32.GetLastError())
             finally:
                 free(mem, bmp, old)
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-            user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+
+        view: Dict[str, object] = {"texts": [], "painted": None, "shown": False}
+
+        def hide(hwnd):
+            if view["shown"]:
+                user32.ShowWindow(hwnd, SW_HIDE)
+                view["shown"] = False
+
+        def tick(hwnd):
+            """Every TICK_MS: new notices are painted; while any are up, the window follows the game window (place,
+            size) and hides while the game is minimized."""
+            texts = self.queue.tick(time.monotonic())
+            if texts is not None:
+                view["texts"], view["painted"] = texts, None
+            if not view["texts"]:
+                hide(hwnd)
+                return
+            game = find_game_window()
+            if game is not None and game[2]:            # the game is minimized
+                hide(hwnd)
+                return
+            if game is None:                            # no game window found: the main screen
+                rect = wt.RECT(0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+            else:
+                rect = game[1]
+            key = (rect.left, rect.top, rect.right, rect.bottom)
+            if view["painted"] != key:                  # new notices, or the game window moved or changed size
+                paint(hwnd, view["texts"], rect)
+                view["painted"] = key
+            if not view["shown"]:
+                user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                view["shown"] = True
+            place(hwnd, game[0] if game is not None else None)
 
         def wndproc(hwnd, msg, wparam, lparam):
             if msg == WM_TIMER:
                 try:
-                    texts = self.queue.tick(time.monotonic())
-                    if texts == []:
-                        user32.ShowWindow(hwnd, SW_HIDE)
-                    elif texts:
-                        show(hwnd, texts)
+                    tick(hwnd)
                 except Exception as e:           # report once and stop the loop; _run turns the overlay off
                     state["error"] = e
                     user32.PostQuitMessage(0)
@@ -321,7 +403,7 @@ class Overlay:
         wc = WNDCLASSW(0, proc, 0, 0, hinst, None, None, None, None, "JSRFArchipelagoNotice")
         if not user32.RegisterClassW(ctypes.byref(wc)):
             raise OSError("RegisterClassW failed (%d)" % k32.GetLastError())
-        hwnd = user32.CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        hwnd = user32.CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
                                       "JSRFArchipelagoNotice", "JSRF item notice", WS_POPUP, 0, 0, 10, 10,
                                       None, None, hinst, None)
         if not hwnd:
