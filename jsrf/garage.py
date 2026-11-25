@@ -291,13 +291,19 @@ class GaragePatch:
 # An area mission places its tape from the table at header +0x10C / +0x110 (16 bytes per tape: position, then the tape
 # number N), with op 0x76 at the start (0x5A351 -> 0x43B80). The tape object keeps N at +0x50 and hands it to its pickup
 # (collision entry +0x20 -> 0x44840(N)); it shows itself only while Riddle Tape flag N is clear and its pickup sequence sets
-# flag N and the five challenge open flags when it ends. The client's copies of the free-skate missions (mssn09xx) carry
-# 0x200 + N instead: the flag test of an index from 0x200 up reads 0 (0x39B50) and the setter ignores it (0x39BE0), so the
-# tape is always there until the client takes it away after the pickup, and the pickup sets nothing by itself. Flag N can
-# then follow the tape ITEM (the pause menu's tape and challenges, the fifth challenge's op 0x6A).
+# flag N and the five challenge open flags when it ends. The client's copies of the free-skate missions (mssn09xx) number
+# the tape 13 + N instead, its pickup record flag (game.TAPE_PICKED): the tape shows itself until it is picked up, and the
+# pickup sequence's destructor sets 13 + N (and 97 + 5N .. 101 + 5N in place of the open flags; no script or native code
+# uses 97-161), so the game records the pickup and the tape removes itself the vanilla way. Flag N can then follow the
+# tape ITEM (the pause menu's tape and challenges, the fifth challenge's op 0x6A).
+# Until 2026-11-25 the copies carried 0x200 + N, whose flag the game can neither test nor set: the pickup set nothing and
+# the tape stayed until the client took it away. Whenever the client was not watching (connection to the server down, the
+# client closed with the copies still in place, ...), the player, still standing on the tape when its sequence ended,
+# picked it up again at once, without end (user report 2026-11-25: stuck in the pickup animation, the tape impossible to
+# pick up).
 H_TAPES = 0x10C
 TAPE_ENTRY = 16
-TAPE_NUMBERED = 0x200                  # the number the client's copies give a tape (0x200 + N)
+TAPE_NUMBERED = 13                     # the number the client's copies give a tape: 13 + N (= game.TAPE_PICKED[N])
 TAPE_MISSION_PREFIX = "mssn09"         # the free-skate chapter's missions (file = mssn + hi + lo % 100)
 
 
@@ -312,7 +318,7 @@ def tape_entries(data: bytes) -> List[Tuple[int, int]]:
 
 
 def build_tape_mission(data: bytes) -> Optional[bytes]:
-    """The mission with each of its tapes numbered 0x200 + N (None when it places no Mystery Tape)."""
+    """The mission with each of its tapes numbered 13 + N (None when it places no Mystery Tape)."""
     entries = [(off, n) for off, n in tape_entries(data) if 0 <= n < 13]
     if not entries:
         return None

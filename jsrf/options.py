@@ -49,9 +49,10 @@ class SoulsInPool(Range):
 
 class TagsNeededPercent(Range):
     """Adds a requirement to Gouji's Tower: spray this percent of the city's
-    572 graffiti tag spots (every piece of a spot). Any spot counts, check
-    or not. Rounded up: 50% is 286 spots. Each area holds 26 to 65, so a
-    high share needs most of the Unlock items.
+    573 graffiti tag spots (every piece of a spot). Any spot counts, check
+    or not. Rounded up: 50% is 287 spots. Each area holds 26 to 65 (99th
+    Street 66, with the Expo Stadium's spot), so a high share needs most
+    of the Unlock items.
 
     **0** (the default): not needed."""
     display_name = "Tower: Tag Spots Needed (%)"
@@ -135,8 +136,8 @@ class StartingCharacter(NamedChoice):
 
 
 class IncludeTags(Toggle):
-    """Every graffiti tag spot in the 13 areas becomes a check: 572 in all,
-    save point tags included. A spot counts once all of its pieces are
+    """Every graffiti tag spot in the 13 areas and The Future Site of Rokkaku
+    Expo Stadium becomes a check: 573 in all, save point tags included. A spot counts once all of its pieces are
     sprayed. Makes the seed a lot longer."""
     display_name = "Include Graffiti Tags"
 

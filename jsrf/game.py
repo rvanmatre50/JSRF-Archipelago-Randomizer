@@ -15,6 +15,7 @@ from typing import Dict, Optional, Set, Tuple
 
 from . import procmem
 from .data import (AREAS, AREA_LOCATIONS, BASE_ID, GAME_AREA_INDEX, STAGE_AREAS, TAG_SPOTS, TAPE_FLAG, tag_id,
+                   TAG_STAGE_AREAS, TAG_AREAS as TAG_AREA_NAMES,
                    RIVAL_BATTLES, rival_location_id, TEST_RUNS, JET_RANK, JET_LOCATION_OF)
 
 FLAG_MGR = 0x001EFFB0
@@ -90,7 +91,7 @@ def tag_done(state: int, parts: int) -> bool:
     return all((state >> (3 * i)) & 7 != 7 for i in range(min(parts, 10)))
 
 
-TAG_PARTS = {(area, slot): parts for area in AREAS for slot, parts in TAG_SPOTS[area]}
+TAG_PARTS = {(area, slot): parts for area in TAG_AREA_NAMES for slot, parts in TAG_SPOTS[area]}
 
 # One-time tag reset (found 2026-11-21, after 19 restored Shibuya tags came back unsprayed). Eight areas' chapter 8 and 9
 # missions (mssn08xx / mssn09xx, record table 0x174) start with "if Global flag F = 0: op 0x88 on tag list 1, set F". Op 0x88
@@ -198,10 +199,28 @@ TAPE_LOCATIONS = {TAPE_FLAG[area]: BASE_ID + 100 * i + j for i, area in enumerat
 # challenges only while flag N is set, and the area mission's op 0x6A needs it for the fifth challenge), so the pickup is
 # recorded in a flag of its own, Riddle Tape 13 + N. Flags 13-31 are used by no mission script (scan of 191 files) and by no
 # native code (every bank 3 access with a fixed number comes from the area table at 0x21C270, Roboy's 384+/416+ or a
-# tape's own number). The levels' tapes carry 0x200 + N in the client's copies of the area missions (garage.py), so they
-# stay out whatever flag N says and their pickup sets nothing by itself.
+# tape's own number). The levels' tapes carry 13 + N in the client's copies of the area missions (garage.py, 2026-11-25;
+# 0x200 + N before), so they stay out whatever flag N says, their pickup sets 13 + N by itself (plus 97 + 5N .. 101 + 5N,
+# used by nothing) and they remove themselves after it like the game's own tapes. The native Riddle flag accesses
+# (0x43830, 0x438D5, 0x4398C, 0x439AA: the tape objects; 0x754FF / 0x75523: Roboy's 384+ / 416+; 0x77944-0x77A85 and
+# 0x788AD: the pause menu's area table) touch none of 97-161.
 TAPE_PICKED_BASE = 13
 TAPE_PICKED = {n: TAPE_PICKED_BASE + n for n in TAPE_LOCATIONS}
+
+
+def tape_number(value: int) -> int:
+    """The Mystery Tape N behind a tape object's or sequence's number: N (the game's own missions), 13 + N (the client's
+    copies) or 0x200 + N (a defused sequence, or copies written by a client from before 2026-11-25)."""
+    if value >= TAPE_DEFUSED:
+        return value - TAPE_DEFUSED
+    if value >= TAPE_PICKED_BASE:
+        return value - TAPE_PICKED_BASE
+    return value
+
+
+def tape_numbers(n: int) -> tuple:
+    """Every number tape N's object can carry (see tape_number)."""
+    return (n, TAPE_PICKED_BASE + n, TAPE_DEFUSED + n)
 GLOBAL_FLAGS = FLAG_MGR + 0x58         # story flag bank 2 ("Global"), 512 bits, LSB first
 # Fresh-save handling (2026-11-17): the client ties a save to its seed by writing a 32-bit marker into Global flags 480-511
 # (the bank's last dword). The flag record is part of the save; New Game (0x3AED0, and the three menu variants 0x3B420 /
@@ -869,7 +888,7 @@ class JSRFGame:
     # ---- graffiti tags ----
 
     def loaded_spots(self) -> list:
-        """The spots of the loaded stage: dicts with area (None if the stage is not one of ours), slot, parts, state."""
+        """The spots of the loaded stage: dicts with area (its tag area; None if the stage has none), slot, parts, state."""
         out, seen = [], set()
         p = self._u32(GRAFFITI_MGR + SPOT_LIST)
         while p and p < XBOX_RAM - 0x200 and p not in seen and len(out) < MAX_SPOTS:
@@ -878,7 +897,7 @@ class JSRFGame:
             if len(raw) != SPOT_NEXT + 4 - SPOT_PARTS:
                 break
             f = lambda off: struct.unpack_from("<I", raw, off - SPOT_PARTS)[0]
-            out.append({"area": STAGE_AREAS.get(f(SPOT_STAGE)), "slot": f(SPOT_SLOT), "parts": f(SPOT_PARTS),
+            out.append({"area": TAG_STAGE_AREAS.get(f(SPOT_STAGE)), "slot": f(SPOT_SLOT), "parts": f(SPOT_PARTS),
                         "state": f(SPOT_STATE)})
             p = f(SPOT_NEXT)
         return out
@@ -902,7 +921,7 @@ class JSRFGame:
         done: Set[tuple] = set()
         raw = self.reader.read(TAG_RECORD, TAG_AREAS * TAG_SLOTS * 8)
         if len(raw) == TAG_AREAS * TAG_SLOTS * 8:
-            for area in AREAS:
+            for area in TAG_AREA_NAMES:
                 block = raw[GAME_AREA_INDEX[area] * TAG_SLOTS * 8:(GAME_AREA_INDEX[area] + 1) * TAG_SLOTS * 8]
                 if not any(block):                    # an area record that was never written: nothing to read there
                     continue

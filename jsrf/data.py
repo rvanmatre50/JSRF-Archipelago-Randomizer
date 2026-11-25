@@ -87,9 +87,16 @@ STAGE_AREAS = {
     0x00030003: "Highway Zero",
     0x00030004: "Skyscraper District and Pharaoh Park",
 }
-# Stages the F6 list offers that are not one of our areas (no locations there, so the client ignores them).
+# The Future Site of Rokkaku Expo Stadium (user, 2026-11-25): a stage of its own (0x30002; free-skate mission 9:165 =
+# mssn0965, Jazz's race 9:166 = mssn0966), not one of the 13 areas (no Unlock item, never bounced). Its two checks, Jazz
+# joining and its one graffiti spot (slot 0, the save point tag), carry its name but sit in the 99th Street region: they
+# need the 99th Street Unlock and the client holds them until it arrives.
+EXPO = "The Future Site of Rokkaku Expo Stadium"
+EXPO_STAGE = 0x00030002
+EXPO_REGION = "99th Street"
+# Stages the F6 list offers that are not one of our areas (not locked, never bounced).
 OTHER_STAGES = {
-    0x00030002: "Rokkaku Expo",
+    EXPO_STAGE: EXPO,
 }
 
 
@@ -457,14 +464,25 @@ TAG_SPOTS = {
         (15, 6), (16, 1), (17, 10), (18, 10), (19, 1), (20, 6), (21, 1), (22, 1), (23, 10), (24, 1), (25, 3), (27, 1),
         (28, 3), (29, 1), (30, 1), (31, 3), (32, 6),
     ),
+    # added 2026-11-25 (user): the stadium's missions (mssn0965, 0966) list one spot, slot 0, with 3 parts (the spot
+    # record's +0xA0, which matches the parts of all 65 99th Street spots in mssn0955)
+    EXPO: (
+        (0, 3),
+    ),
 }
+# Tag areas: the 13 areas plus the stadium. A tag area's spots are checks of its region.
+TAG_AREAS = tuple(AREAS) + (EXPO,)
+TAG_REGION = {area: area for area in AREAS}
+TAG_REGION[EXPO] = EXPO_REGION
+TAG_STAGE_AREAS = dict(STAGE_AREAS)              # stage code -> tag area (the loaded spots carry their stage's code)
+TAG_STAGE_AREAS[EXPO_STAGE] = EXPO
 
 # Tag ids live in their own range so changing a list never shifts soul/tape ids:
-# BASE_ID + 10_000 + area_index * 100 + slot + 1   (slot 0-79)
+# BASE_ID + 10_000 + tag_area_index * 100 + slot + 1   (slot 0-79; the stadium is tag area 13, after the 13 areas)
 TAG_ID_OFFSET = 10_000
 SAVE_TAG_SLOTS = frozenset({0, 1, 2})
-TAG_COUNTS = {area: len(TAG_SPOTS[area]) for area in AREAS}
-TAG_TOTAL = sum(TAG_COUNTS.values())             # 572
+TAG_COUNTS = {area: len(TAG_SPOTS[area]) for area in TAG_AREAS}
+TAG_TOTAL = sum(TAG_COUNTS.values())             # 573
 
 # Gouji's Tower requirements (user, 2026-11-17): the Tower Unlock item always, plus any of Graffiti Soul items, sprayed tag
 # spots and cleared Street Challenges, stacked. Beating Gouji in the Tower is the goal. The tag / challenge requirements are
@@ -543,9 +561,11 @@ GAME_AREA_INDEX = {
     "Tokyo Underground Sewage Facility": 7, "Kibogaoka Hill": 8, "Bottom Point of Sewage Facility": 9,
     "Fortified Residential Zone": 10, "99th Street": 11, "Sky Dinosaurian Square": 12, "Highway Zero": 14,
     "Skyscraper District and Pharaoh Park": 15,
+    EXPO: 13,                                     # 0x1EFC88[32] (stage 0x30002) = 13
 }
 
-for _area in AREAS:
+assert set(TAG_SPOTS) == set(TAG_AREAS) and all(TAG_REGION[a] in AREAS for a in TAG_AREAS)
+for _area in TAG_AREAS:
     assert _area in TAG_SPOTS and _area in GAME_AREA_INDEX, _area
     assert all(0 <= _slot < 80 and 0 <= _parts <= 10 for _slot, _parts in TAG_SPOTS[_area]), _area
     assert len({_slot for _slot, _ in TAG_SPOTS[_area]}) == len(TAG_SPOTS[_area]), _area
@@ -559,16 +579,21 @@ def tag_name(area: str, slot: int) -> str:
 
 def tag_id(area: str, slot: int) -> int:
     assert 0 <= slot < 80
-    return BASE_ID + TAG_ID_OFFSET + AREAS.index(area) * 100 + slot + 1
+    return BASE_ID + TAG_ID_OFFSET + TAG_AREAS.index(area) * 100 + slot + 1
 
 
 def tag_slot_of_id(location_id: int) -> "Optional[Tuple[str, int]]":
-    """(area, slot) for a tag location id, or None."""
+    """(tag area, slot) for a tag location id, or None."""
     rel = location_id - BASE_ID - TAG_ID_OFFSET
     idx, n = divmod(rel, 100)
-    if rel < 0 or not 0 <= idx < len(AREAS) or not 1 <= n <= 80:
+    if rel < 0 or not 0 <= idx < len(TAG_AREAS) or not 1 <= n <= 80:
         return None
-    return AREAS[idx], n - 1
+    return TAG_AREAS[idx], n - 1
+
+
+def tag_areas_of_region(region: str) -> "List[str]":
+    """The tag areas whose spots are checks of this region (the area itself, and the stadium for 99th Street)."""
+    return [a for a in TAG_AREAS if TAG_REGION[a] == region]
 
 
 # --- Characters ---------------------------------------------------------------------
@@ -585,7 +610,7 @@ CHARACTER_ITEMS = tuple(sorted(CHARACTERS))      # every character has an item; 
 NEW_GAME_CHARACTER = 6                           # New Game puts you in as Yoyo (default.xbe 0x7C3EF writes 6 to variable 0xD)
 CHARACTER_ITEM_OFFSET = 2_000                    # item id = BASE_ID + 2_000 + character id
 CHARACTER_LOCATION_OFFSET = 20_000               # location id = BASE_ID + 20_000 + character id
-ROKKAKU_EXPO_STAGE = 0x00030002
+ROKKAKU_EXPO_STAGE = EXPO_STAGE
 
 
 class CharacterUnlock(NamedTuple):
@@ -607,7 +632,7 @@ CHARACTER_UNLOCKS = [
     CharacterUnlock(4, "Rokkaku-dai Heights", (), (_stage_of("Rokkaku-dai Heights"),), "recruit"),
     CharacterUnlock(9, "Kibogaoka Hill", (), (_stage_of("Kibogaoka Hill"),), "recruit"),
     CharacterUnlock(10, "Bottom Point of Sewage Facility", (), (_stage_of("Bottom Point of Sewage Facility"),), "recruit"),
-    CharacterUnlock(21, "99th Street", (), (ROKKAKU_EXPO_STAGE,), "recruit"),          # the race is in Rokkaku Expo
+    CharacterUnlock(21, EXPO_REGION, (), (EXPO_STAGE,), "recruit"),          # the race is in the Expo Stadium
     CharacterUnlock(5, "Highway Zero", (), (_stage_of("Highway Zero"),), "recruit"),
     CharacterUnlock(15, "Dogenzaka Hill", (), (_stage_of("Dogenzaka Hill"),), "test_run"),
     CharacterUnlock(23, "Shibuya Terminal", (), (_stage_of("Shibuya Terminal"),), "test_run"),
@@ -640,9 +665,13 @@ def character_of_item(item_id: int) -> "Optional[int]":
     return char if char in CHARACTERS else None
 
 
+# Where a character's unlock happens when that is not its region's own stage (the name the location carries).
+CHARACTER_PLACE = {21: EXPO}                     # Jazz's race (user, 2026-11-25)
+
+
 def character_location_name(char: int) -> str:
     u = CHARACTER_UNLOCK_OF[char]
-    return f"{u.area} - {CHARACTERS[char]} Joins"
+    return f"{CHARACTER_PLACE.get(char, u.area)} - {CHARACTERS[char]} Joins"
 
 
 def character_location_id(char: int) -> int:
@@ -696,8 +725,9 @@ def location_requirements() -> "dict[int, Tuple[str, ...]]":
     for i, area in enumerate(AREAS):
         for j, loc in enumerate(AREA_LOCATIONS[area]):
             out[BASE_ID + 100 * i + j] = (area,) + tuple(loc.reach)
+    for area in TAG_AREAS:
         for slot, _ in TAG_SPOTS[area]:
-            out[tag_id(area, slot)] = (area,)
+            out[tag_id(area, slot)] = (TAG_REGION[area],)
     for u in CHARACTER_UNLOCKS:
         out[character_location_id(u.char)] = (u.area,) + u.reach
     for r in RIVAL_BATTLES:

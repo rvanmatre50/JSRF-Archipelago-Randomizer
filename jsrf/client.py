@@ -38,7 +38,8 @@ detail = logging.getLogger("JSRF")
 from .data import (AREAS, CORN_CHAIN, CORN_CHAIN_STOP, CORN_DONE_FLAG, CORN_FLAG_SETUP, CORN_FLAG_TALK, CORN_FLAG_TALKING,
                    CORN_FLAGS_RESET, CORN_MISSION, CORN_MISSION_ID,
                    DEFAULT_START_INDEX, FINALE_STAGES, GAME_NAME, GARAGE_START_INDEX, GARAGE_STAGE,
-                   GOAL_STAGE, OTHER_STAGES, SOUL_ITEM, STAGE_AREAS, TAG_SPOTS, TOWER,
+                   GOAL_STAGE, OTHER_STAGES, SOUL_ITEM, STAGE_AREAS, TAG_SPOTS, TOWER, TAG_AREAS, TAG_REGION,
+                   TAG_STAGE_AREAS, EXPO_STAGE, EXPO_REGION,
                    CHARACTERS, CHARACTER_UNLOCKS, CHARACTER_UNLOCK_OF, START_CHARACTERS,
                    character_of_item, character_location_id, character_location_name,
                    AREA_LOCATIONS, BASE_ID, character_of_location, rival_of_location, tag_slot_of_id,
@@ -160,9 +161,10 @@ class JSRFCommandProcessor(ClientCommandProcessor):
             return
         done = ctx.state().sprayed_tags()
         open_areas = ctx.unlocked_areas()
-        for area in AREAS:
+        for area in TAG_AREAS:
             n = sum(1 for slot, _ in TAG_SPOTS[area] if (area, slot) in done)
-            logger.info("%s: %d of %d tags%s" % (area, n, len(TAG_SPOTS[area]), "" if area in open_areas else " (locked, held)"))
+            logger.info("%s: %d of %d tags%s" % (area, n, len(TAG_SPOTS[area]),
+                                                 "" if TAG_REGION[area] in open_areas else " (locked, held)"))
 
     def _dev_characters(self):
         """Show your characters and which character unlock checks are still open."""
@@ -363,6 +365,10 @@ class JSRFCommandProcessor(ClientCommandProcessor):
             missing = ctx.tower_missing()
             where = TOWER if code == TOWER_STAGE else FINALE_STAGES[code]
             logger.info("You are in %s (%s)." % (where, "open" if not missing else "LOCKED: you still need " + ", ".join(missing)))
+        elif code == EXPO_STAGE:
+            logger.info("You are in %s. Its checks belong to %s: they go through once you have the %s item%s."
+                        % (OTHER_STAGES[code], EXPO_REGION, unlock_name(EXPO_REGION),
+                           " (you have it)" if EXPO_REGION in ctx.unlocked_areas() else ""))
         elif code in OTHER_STAGES:
             logger.info("You are in %s, which has no checks." % OTHER_STAGES[code])
         else:
@@ -1066,7 +1072,7 @@ class JSRFContext(CommonContext):
         return True
 
     def tapes_setup(self) -> int:
-        """With Mystery Tape items: write the client's copies of the free-skate area missions, whose tapes carry 0x200 + N
+        """With Mystery Tape items: write the client's copies of the free-skate area missions, whose tapes carry 13 + N
         (see sync_tapes). The game reads them the next time an area loads. Returns how many were written."""
         if not self.manage_tapes:
             return 0
@@ -1365,7 +1371,7 @@ class JSRFContext(CommonContext):
         if tags:
             # Tags of the area the player is in come back once they have left it (see JSRFGame.restore_tags).
             code = state.current_stage()
-            tags_done = state.restore_tags(tags, area_of_stage(code) if code is not None else None)
+            tags_done = state.restore_tags(tags, TAG_STAGE_AREAS.get(code) if code is not None else None)
         souls = len(plan["souls"]) - len(plan["marks"])
         parts = [(souls, "Graffiti Soul"), (len(plan["marks"]), "Street Challenge"), (len(plan["rivals"]), "rival gang win"),
                  (len(plan["jets"]), "Jet rank"), (len(tags_done), "tag")]
@@ -1745,10 +1751,12 @@ class JSRFContext(CommonContext):
         """Mystery Tapes and Street Challenges with tape items (user design 2026-11-16, reworked 2026-11-19 evening): an
         area's tape flag N and its five challenge open flags follow the area's Mystery Tape ITEM, so the item alone shows
         the tape and the challenges in the pause menu and opens them (user, 18:42). Picking the tape up is only the tape
-        check, recorded in flag 13 + N (game.TAPE_PICKED). The levels' tapes carry 0x200 + N in the client's copies of the
-        area missions (garage.TapeMissions), so they are there whatever flag N says and their pickup sets nothing; after
-        the pickup the client takes the tape away on every visit. A tape that still carries N (its mission was loaded
-        before the copies were written) is defused when the item is missing, as before. True when something was written."""
+        check, recorded in flag 13 + N (game.TAPE_PICKED). The levels' tapes carry 13 + N in the client's copies of the
+        area missions (garage.TapeMissions), so they are there whatever flag N says, and their pickup sets 13 + N by itself
+        and takes the tape away the game's own way, with or without the client watching (user report 2026-11-25: with
+        the old 0x200 + N a pickup the client did not see repeated without end). The client still notes the pickup and
+        takes the level's tape away at once. A tape that still carries N (its mission was loaded before the copies were
+        written) is defused when the item is missing, as before. True when something was written."""
         if not self.manage_tapes or not getattr(self.game_reader, "can_write", False):
             return False
         now = time.monotonic()
@@ -1772,18 +1780,18 @@ class JSRFContext(CommonContext):
         events = state.tape_events() if armed or self.tape_pending else []
         alive = {addr for addr, _ in events}
         for addr, value in events:
-            n = value - jsrf_game.TAPE_DEFUSED if value >= jsrf_game.TAPE_DEFUSED else value
+            n = jsrf_game.tape_number(value)
             area = TAPE_AREA.get(n)
             if area is None or addr in self.tape_pending:
                 continue
-            if value < jsrf_game.TAPE_DEFUSED and area not in have:
+            if value == n and area not in have:
                 state.defuse_tape_event(addr, value)   # an old-numbered tape: its pickup must not open the challenges
             self.tape_pending[addr] = (n, now)
             detail.info("Mystery Tape %d (%s) picked up." % (n, area))
             # The tape lying in the level stays until it is taken away; the player, still standing on it, would pick it
             # up a second time when the sequence ends (user, 2026-11-19 15:48).
             for obj, num, shown in state.world_tapes():
-                if num in (n, jsrf_game.TAPE_DEFUSED + n) and shown:
+                if num in jsrf_game.tape_numbers(n) and shown:
                     state.remove_world_tape(obj, num)
         for addr, (n, since) in list(self.tape_pending.items()):
             if addr in alive and now - since < TAPE_EVENT_MAX:
@@ -1847,7 +1855,7 @@ class JSRFContext(CommonContext):
         removed = False
         state = self.state()
         for addr, n, shown in state.world_tapes():
-            if n in (tape, jsrf_game.TAPE_DEFUSED + tape) and shown and state.remove_world_tape(addr, n):
+            if n in jsrf_game.tape_numbers(tape) and shown and state.remove_world_tape(addr, n):
                 removed = True
                 detail.info("%s: took away the tape the level placed again (already picked up)." % area)
         return removed

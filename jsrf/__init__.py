@@ -9,7 +9,8 @@ from worlds.LauncherComponents import Component, Type, components, icon_paths, l
 
 from .data import (AREAS, AREA_LOCATIONS, BASE_ID, CHARACTER_ITEMS, CHARACTER_UNLOCKS, CHARACTERS, CONNECTIONS, FILLER_ITEMS,
                    START_CHARACTERS, RELEASE,
-                   GAME_NAME, GARAGE, SOUL_ITEM, STARTING_AREAS, TAG_SPOTS, TOWER,
+                   GAME_NAME, GARAGE, SOUL_ITEM, STARTING_AREAS, TAG_SPOTS, TOWER, TAG_AREAS, TAG_REGION, EXPO,
+                   CHARACTER_PLACE, tag_areas_of_region,
                    TOWER_PARENT, TOWER_UNLOCK, LocData,
                    location_name, tag_id, tag_name, unlock_name, SAVE_TAG_SLOTS,
                    character_item_id, character_item_name, character_location_id, character_location_name,
@@ -108,6 +109,8 @@ for _i, _area in enumerate(AREAS):
         _kind = {"soul": "Pre-spawned Souls", "challenge_soul": "Street Challenges",
                  "tape": "Mystery Tapes"}[_loc.kind]
         LOCATION_GROUPS[_kind].add(_name)
+LOCATION_GROUPS[EXPO] = set()                    # the stadium's checks (99th Street region, user 2026-11-25)
+for _area in TAG_AREAS:
     for _slot, _ in TAG_SPOTS[_area]:
         _tname = tag_name(_area, _slot)
         LOCATION_IDS[_tname] = tag_id(_area, _slot)
@@ -120,7 +123,7 @@ for _i, _area in enumerate(AREAS):
 for _u in CHARACTER_UNLOCKS:
     _cname = character_location_name(_u.char)
     LOCATION_IDS[_cname] = character_location_id(_u.char)
-    LOCATION_GROUPS[_u.area].add(_cname)
+    LOCATION_GROUPS[CHARACTER_PLACE.get(_u.char, _u.area)].add(_cname)
     LOCATION_GROUPS["Character Unlocks"].add(_cname)
 for _r in RIVAL_BATTLES:
     _rname = rival_location_name(_r)
@@ -207,11 +210,12 @@ class JSRFWorld(World):
                     JSRFLocation(self.player, name, self.location_name_to_id[name], region))
                 self.created.add(name)
             if self.options.include_tags:
-                for slot, _ in TAG_SPOTS[area]:
-                    tname = tag_name(area, slot)
-                    region.locations.append(
-                        JSRFLocation(self.player, tname, self.location_name_to_id[tname], region))
-                    self.created.add(tname)
+                for tag_area in tag_areas_of_region(area):         # 99th Street also holds the Expo Stadium's spot
+                    for slot, _ in TAG_SPOTS[tag_area]:
+                        tname = tag_name(tag_area, slot)
+                        region.locations.append(
+                            JSRFLocation(self.player, tname, self.location_name_to_id[tname], region))
+                        self.created.add(tname)
             for u in CHARACTER_UNLOCKS:
                 if u.area == area and self._character_included(u):
                     cname = character_location_name(u.char)
@@ -354,7 +358,8 @@ class JSRFWorld(World):
             # Any tag spot counts, check or not, so an area adds all of its spots once it can be reached.
             need_tags = self.tags_needed
             add_rule(self.multiworld.get_location(TAGS_EVENT, player),
-                     lambda state: sum(TAG_COUNTS[a] for a in AREAS if state.can_reach_region(a, player)) >= need_tags)
+                     lambda state: sum(TAG_COUNTS[a] for a in TAG_AREAS
+                                       if state.can_reach_region(TAG_REGION[a], player)) >= need_tags)
         if self.challenges_needed:
             # A Street Challenge can be cleared once its area (and anything its soul's spot needs) can be reached and,
             # with Mystery Tape items, the area's tape item is in (whether the challenge souls are checks or not).
