@@ -2,7 +2,7 @@
 
 An [Archipelago](https://archipelago.gg) world and client for Jet Set Radio Future, played on JSRF Unleashed for Windows.
 
-**Current release: v1.2a (alpha).**
+**Current release: v1.0a (alpha).**
 
 ## What it does
 
@@ -19,7 +19,7 @@ arrives, and what you find in the city is sent out to the multiworld.
 | Rival gang battles (Doom Riders, Love Shockers, Immortals) | 3 |
 | Recruited characters (Rhyth, Boogie, Cube, Jazz, Soda) | 5, or 17 with the Test Run characters |
 | Jet ranks on Roboy's Test Runs | 39 |
-| Graffiti tag spots (off by default) | 572 |
+| Graffiti tag spots (off by default) | 573 |
 
 **Items:** an Unlock item for each area, every character, Mystery Tape items (an area's Street Challenges open with its
 tape), Graffiti Soul items, Gouji's Tower Unlock, and Spray Can / Health refills as filler.
